@@ -1,0 +1,103 @@
+def scriptToRun // The sh script that needs to be run, according to the input file.
+
+task initScript() {
+    doFirst {
+        if (!new File("${projectDir}/extracted/oxygen/").exists()) {
+            ant.get(src: 'https://www.oxygenxml.com/InstData/Editor/All/oxygen.tar.gz', dest: "${projectDir}/oxygen.tar.gz", skipexisting: 'true')
+            ant.untar(src: "${projectDir}/oxygen.tar.gz", dest: "${projectDir}/extracted", compression: 'gzip')
+
+            String key = System.getenv('SCRIPTING_LICENSE_KEY')
+            if (key == null) {
+                throw new TaskExecutionException(it, new Exception("You need a valid Oxygen Scripting license key."))
+            } else {
+                new File("${projectDir}/extracted/oxygen/scriptinglicensekey.txt").write(key.replaceAll("  ", "\n"))
+            }
+        }
+    }
+
+    String schemaExtension = schemaFile.lastIndexOf('.').with {it != -1 ? schemaFile[it..<schemaFile.length()] : schemaFile}
+
+    switch (schemaExtension) {
+        case ".xsd":
+            scriptToRun = "schemaDocumentation.sh"
+            break
+        case ".xsl":
+            scriptToRun = "stylesheetDocumentation.sh"
+            break
+        case ".wsdl":
+            scriptToRun = "wsdlDocumentation.sh"
+            break
+        case ".json":
+            if (isOpenAPI){
+                scriptToRun = "openApiDocGen.sh"
+                break
+            }
+        case ".jschema":
+            scriptToRun = "jsonSchemaDocGen.sh"
+            break
+        case ".yaml":
+        case ".yml":
+            scriptToRun = "openApiDocGen.sh"
+            break
+        default:
+            break
+    }
+
+    doLast {
+        project.exec {
+            workingDir "${projectDir}/extracted/oxygen/scripts"
+            commandLine 'chmod', '700', scriptToRun
+        }
+    }
+}
+
+task downloadAddon(dependsOn: [initScript]) {
+    doFirst {
+        if (new File("${projectDir}/extracted/oxygen/").exists()) {
+            String oxygenPluginsDir = "${projectDir}/extracted/oxygen/plugins/" as String
+            if ("openApiDocGen.sh".equals(scriptToRun)) {
+                String openApiAddonUrl = "https://www.oxygenxml.com/InstData/Addons/default/com/oxygenxml/oxygen-openapi-doc-generator-addon/2.1.0/oxygen-openapi-doc-generator-addon-2.1.0-plugin.jar"
+                String openApiAddonDir = "oxygen-openapi-doc-generator-addon-2.1.0";
+                ant.get(src: openApiAddonUrl, dest: oxygenPluginsDir, skipexisting: 'true')
+                ant.unjar(src: "${projectDir}/extracted/oxygen/plugins/oxygen-openapi-doc-generator-addon-2.1.0-plugin.jar",
+                        dest: oxygenPluginsDir + openApiAddonDir)
+                ant.move(file: oxygenPluginsDir + openApiAddonDir + '/' + openApiAddonDir, todir: oxygenPluginsDir)
+            } else if ("jsonSchemaDocGen.sh".equals(scriptToRun)) {
+                String jsonSchemaAddonUrl = "https://www.oxygenxml.com/InstData/Addons/default/com/oxygenxml/oxygen-json-schema-doc-generator-addon/4.1.0/oxygen-json-schema-doc-generator-addon-4.1.0-plugin.jar"
+                String jsonSchemaAddonDirName = "oxygen-json-schema-doc-generator-addon-4.1.0";
+                ant.get(src: jsonSchemaAddonUrl, dest: oxygenPluginsDir, skipexisting: 'true')
+                ant.unjar(src: "${projectDir}/extracted/oxygen/plugins/oxygen-json-schema-doc-generator-addon-4.1.0-plugin.jar",
+                        dest: oxygenPluginsDir + jsonSchemaAddonDirName)
+                ant.move(file: oxygenPluginsDir + jsonSchemaAddonDirName + '/' + jsonSchemaAddonDirName, todir: oxygenPluginsDir)
+            }
+        }
+    }
+}
+
+task generateDoc(type: Exec, dependsOn: [initScript, downloadAddon]) {
+    // Compute the absolute schema file path depending on where the script is started from.
+    String schemaFilePath = "${projectDir}" + (innerBuild.toBoolean() ? "/../schemas/" : "/../../") + schemaFile
+    String schemaName = schemaFile.lastIndexOf('/') != -1 ?
+            schemaFile.takeBetween('/', '.') :
+            schemaFile.take(schemaFile.lastIndexOf('.'))
+    String outputFilePath = "${projectDir}/../doc/" + schemaName + ".html"
+
+    workingDir "${projectDir}/extracted/oxygen"
+    // Different param for output file for JSON Schema and OpenAPI scripts.
+    boolean isOpenApiOrJsonSchema = "jsonSchemaDocGen.sh".equals(scriptToRun) || "openApiDocGen.sh".equals(scriptToRun)
+    if (isOpenApiOrJsonSchema) {
+        commandLine "scripts/" + scriptToRun, schemaFilePath, "-ofp", outputFilePath
+    } else {
+        commandLine "scripts/" + scriptToRun, schemaFilePath, "-out:" + outputFilePath
+    }
+
+    doLast {
+        if (execResult.getExitValue() != 0) {
+            println new File(outputFilePath).text
+            throw new TaskExecutionException(it, new Exception("Generation failed, see task output for details."))
+        }
+    }
+}
+
+defaultTasks 'generateDoc'
+
